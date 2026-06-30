@@ -1786,17 +1786,18 @@ let beData = { contracts: [], supplies: [], payrolls: [] };
 window.openBreakEvenModal = async () => {
   $('#loader').show();
   try {
-    const [contracts, supplies, payrolls] = await Promise.all([
+    const [contracts, supplies, payrolls, capitals] = await Promise.all([
       runGoogle('getContractsData'),
       runGoogle('getSuppliesData'),
-      runGoogle('getPayrollData')
+      runGoogle('getPayrollData'),
+      runGoogle('getCapitalData')   // ← เพิ่มบรรทัดนี้
     ]);
     beData = {
       contracts: contracts || [],
       supplies:  supplies  || [],
-      payrolls:  payrolls  || []
+      payrolls:  payrolls  || [],
+      capitals:  capitals  || []     // ← เพิ่มบรรทัดนี้
     };
-    // populate project dropdown
     const sel = $('#beProjectFilter');
     sel.html('<option value="__ALL__">ภาพรวมทุกโครงการ</option>');
     beData.contracts.forEach(c => {
@@ -1824,12 +1825,10 @@ function beParseDate(str) {
 }
 
 function beCalcProjectData(projectName) {
-  const { contracts, supplies, payrolls } = beData;
+  const { contracts, supplies, payrolls, capitals } = beData;
 
   const REVENUE_KW = ['ค่างวด', 'รายรับ'];
-  const EXPENSE_KW = ['ภาษี', 'ประกันสังคม', 'เดินทาง', 'สอบบัญชี', 'กองทุน'];
 
-  // ── time-series events (date + delta) per project ──
   const events = []; // { date, revenueReal, expense }
 
   supplies.forEach(s => {
@@ -1853,15 +1852,23 @@ function beCalcProjectData(projectName) {
   payrolls.forEach(p => {
     const date = beParseDate(p.rawDate);
     if (!date) return;
-    // payrolls are not project-specific → include for __ALL__ always,
-    // for single project include proportionally (simple: include all when __ALL__, skip for single project)
     if (projectName !== '__ALL__') return;
     events.push({ date, revenueReal: 0, expense: parseFloat(p.netPay)||0 });
   });
 
+  // ── ✨ Capital Injection: เงินลงทุน = ส่วนหนึ่งของ "เงินที่จ่ายออกไป" ──
+  capitals.forEach(c => {
+    const date = beParseDate(c.rawDate || c.date);
+    if (!date) return;
+    const proj = c.project || '';
+    // กรณีเลือกดูภาพรวม → รวมทุกก้อน
+    // กรณีเลือกดูเฉพาะโครงการ → รวมเฉพาะที่ระบุชื่อโครงการตรงกัน
+    if (projectName !== '__ALL__' && proj !== projectName) return;
+    events.push({ date, revenueReal: 0, expense: parseFloat(c.amount)||0 });
+  });
+
   events.sort((a, b) => a.date - b.date);
 
-  // build cumulative series
   const labels = [], cumRevReal = [], cumExp = [];
   let sumRev = 0, sumExp = 0;
   events.forEach(ev => {
@@ -1873,7 +1880,6 @@ function beCalcProjectData(projectName) {
     cumExp.push(+sumExp.toFixed(2));
   });
 
-  // contract value line (flat = target)
   let contractValue = 0;
   if (projectName === '__ALL__') {
     contracts.forEach(c => contractValue += parseFloat(c.totalValue||0));
@@ -1883,16 +1889,23 @@ function beCalcProjectData(projectName) {
   }
   const cumContract = labels.map(() => +contractValue.toFixed(2));
 
-  // find break-even index (where cumRevReal >= cumExp first time)
   let beIdx = -1;
   for (let i = 0; i < cumRevReal.length; i++) {
     if (cumRevReal[i] >= cumExp[i] && cumExp[i] > 0) { beIdx = i; break; }
   }
 
+  // ✨ เพิ่มยอดเงินทุนรวม เพื่อโชว์แยกใน KPI
+  let totalCapital = 0;
+  capitals.forEach(c => {
+    if (projectName !== '__ALL__' && (c.project || '') !== projectName) return;
+    totalCapital += parseFloat(c.amount)||0;
+  });
+
   return {
     labels, cumRevReal, cumExp, cumContract,
     finalRev: sumRev, finalExp: sumExp,
-    profit: sumRev - sumExp, contractValue, beIdx
+    profit: sumRev - sumExp, contractValue, beIdx,
+    totalCapital   // ← เพิ่ม field นี้
   };
 }
 
@@ -1903,31 +1916,37 @@ window.renderBreakEvenChart = () => {
   // ── KPI cards ──
   const profitPos = d.profit >= 0;
   const pct = d.contractValue > 0 ? (d.finalRev / d.contractValue * 100).toFixed(1) : 0;
-  $('#beKpiRow').html(`
-    <div class="col-6 col-md-3">
-      <div class="kpi-card kpi-revenue p-3">
-        <div class="kpi-label">มูลค่าสัญญา</div>
-        <div class="kpi-value">${formatMoney(d.contractValue)}</div>
+$('#beKpiRow').html(`
+    <div class="col-6 col-md-2">
+      <div class="kpi-card kpi-capital p-3">
+        <div class="kpi-label">เงินทุนที่ลงไป</div>
+        <div class="kpi-value" style="font-size:1.3rem;">${formatMoney(d.totalCapital)}</div>
       </div>
     </div>
-    <div class="col-6 col-md-3">
+    <div class="col-6 col-md-2">
+      <div class="kpi-card kpi-revenue p-3">
+        <div class="kpi-label">มูลค่าสัญญา</div>
+        <div class="kpi-value" style="font-size:1.3rem;">${formatMoney(d.contractValue)}</div>
+      </div>
+    </div>
+    <div class="col-6 col-md-2">
       <div class="kpi-card kpi-received p-3">
         <div class="kpi-label">รายรับจริงสะสม</div>
-        <div class="kpi-value">${formatMoney(d.finalRev)}</div>
-        <small style="opacity:.8;font-size:.72rem;">รับแล้ว ${pct}% ของสัญญา</small>
+        <div class="kpi-value" style="font-size:1.3rem;">${formatMoney(d.finalRev)}</div>
+        <small style="opacity:.8;font-size:.7rem;">${pct}% ของสัญญา</small>
       </div>
     </div>
     <div class="col-6 col-md-3">
       <div class="kpi-card kpi-expense p-3">
-        <div class="kpi-label">รายจ่ายสะสม</div>
-        <div class="kpi-value">${formatMoney(d.finalExp)}</div>
+        <div class="kpi-label">รายจ่ายรวม (รวมเงินทุน)</div>
+        <div class="kpi-value" style="font-size:1.3rem;">${formatMoney(d.finalExp)}</div>
       </div>
     </div>
     <div class="col-6 col-md-3">
       <div class="kpi-card ${profitPos ? 'kpi-profit-pos' : 'kpi-profit-neg'} p-3">
         <div class="kpi-label">${profitPos ? '✅ กำไรสุทธิ' : '⚠️ ขาดทุน'}</div>
-        <div class="kpi-value">${formatMoney(Math.abs(d.profit))}</div>
-        <small style="opacity:.8;font-size:.72rem;">${d.beIdx >= 0 ? `คุ้มทุนที่จุดที่ ${d.beIdx+1}` : 'ยังไม่ถึงจุดคุ้มทุน'}</small>
+        <div class="kpi-value" style="font-size:1.3rem;">${formatMoney(Math.abs(d.profit))}</div>
+        <small style="opacity:.8;font-size:.7rem;">${d.beIdx >= 0 ? `คุ้มทุนที่จุดที่ ${d.beIdx+1}` : 'ยังไม่ถึงจุดคุ้มทุน'}</small>
       </div>
     </div>
   `);
@@ -1955,7 +1974,7 @@ window.renderBreakEvenChart = () => {
           fill: false
         },
         {
-          label: '🧾 รายจ่ายสะสม',
+          label: '🧾 รายจ่ายสะสม (รวมเงินทุน)',   // ← เปลี่ยนชื่อ label ตรงนี้
           data: d.cumExp,
           borderColor: '#e74c3c',
           backgroundColor: 'rgba(231,76,60,0.08)',
